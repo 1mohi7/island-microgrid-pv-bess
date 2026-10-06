@@ -1,0 +1,228 @@
+HOW TO MODIFY THE SIMULINK MODEL AND ADD A NEW SCENARIO
+=======================================================
+
+FILES AND WHAT EACH ONE DOES
+----------------------------
+1. build_microgrid_vf_model.m
+   Generates microgrid_vf_model.slx.
+   It creates the Simulink shell, S-function block, logger, and scope.
+
+2. run_microgrid_vf_scenarios.m
+   Loads ../matlab/results/optimizerResults.mat directly.
+   It gets the optimized PV/BESS/inverter/diesel sizes and the real hourly
+   load/PV data, defines each scenario, runs the model, and exports plots/CSV.
+
+3. microgrid_vf_sfun.m
+   Contains the reduced-order dynamic equations and the actual event logic.
+   Grid/PCC, PV, BESS grid-forming response, diesel, loads, frequency,
+   voltage, and synchronization are represented here.
+
+4. microgrid_vf_model.slx
+   Generated file. Normally DO NOT treat this as the master copy because
+   running build_microgrid_vf_model again can overwrite it.
+
+
+A. HOW TO REBUILD / OPEN THE SLX
+--------------------------------
+Put these files in the same microgrid_vf_simulink folder:
+  build_microgrid_vf_model.m
+  microgrid_vf_sfun.m
+  run_microgrid_vf_scenarios.m
+
+In MATLAB run:
+
+  build_microgrid_vf_model(true)
+
+This regenerates microgrid_vf_model.slx beside the MATLAB files and opens it.
+
+To rebuild without opening it:
+
+  build_microgrid_vf_model
+
+To run all existing scenarios:
+
+  run_microgrid_vf_scenarios
+
+The runner reads the optimizer result directly from:
+  <project>/matlab/results/optimizerResults.mat
+
+No optimizerResults.mat copy is required in the Simulink folder.
+
+
+B. WHAT TO EDIT FOR COMMON CHANGES
+----------------------------------
+1. Change an event time or event size
+   Edit the appropriate scenario section in run_microgrid_vf_scenarios.m.
+
+   Examples:
+     s2.events.loadStepTimeS = 2.0;
+     s2.events.loadStepFraction = 0.20;
+     s3a.events.pvDropFraction = 0.50;
+
+2. Change the selected operating hour
+   Edit i1, i2, i3b, or i4 in run_microgrid_vf_scenarios.m.
+   Scenario 3A selects its operating hour automatically using
+   selectPvDropOperatingHour(...).
+
+3. Change droop or response assumptions
+   Edit the dyn.* values near the top of run_microgrid_vf_scenarios.m.
+   Examples:
+     dyn.pfDroopFraction
+     dyn.qvDroopFraction
+     dyn.effectiveInertiaConstantS
+     dyn.bessPowerTimeConstantS
+     dyn.dieselGovernorTimeConstantS
+
+4. Change the physical/dynamic behavior
+   Edit update(...) and/or scenarioState(...) in microgrid_vf_sfun.m.
+   This is where source commands, power balance, frequency, voltage,
+   diesel response, PCC state, and synchronization are calculated.
+
+5. Change model layout, logger, or scope
+   Edit build_microgrid_vf_model.m and rebuild the .slx.
+
+IMPORTANT:
+The scenario runner sets StopTime for each scenario. Changing only the
+StopTime stored in the .slx does NOT change a scenario's duration.
+Change sX.stopTimeS in run_microgrid_vf_scenarios.m instead.
+
+
+C. HOW TO ADD A NEW SCENARIO
+----------------------------
+Use a new UNIQUE numeric ID. Example below uses ID = 5.
+
+STEP 1 - CREATE THE SCENARIO IN run_microgrid_vf_scenarios.m
+
+Add it after the current S4 definition and before the line:
+  scenarios = [s1 s2 s3a s3b s4];
+
+Example: 30% PV drop plus 10% load increase while islanded
+
+  i5 = 1400;
+  s5 = baseScenario(5,'S5_PV_drop_and_load_step',8.0,dyn,limits,sync);
+  s5.operatingPoint = opPoint(i5,critical,noncritical,pvAvailable,baseTime);
+  s5.operatingPoint.noncriticalLoadKW = 0;
+  s5.operatingPoint.totalLoadKW = s5.operatingPoint.criticalLoadKW;
+  s5.operatingPoint.pvInitialKW = s5.operatingPoint.pvAvailableKW;
+  s5.operatingPoint.bessInitialKW = ...
+      s5.operatingPoint.criticalLoadKW - s5.operatingPoint.pvInitialKW;
+  s5.operatingPoint.dieselInitialKW = 0;
+  s5.operatingPoint.gridInitialKW = 0;
+
+  s5.events.eventTimeS = 2.0;
+  s5.events.pvDropFraction = 0.30;
+  s5.events.loadIncreaseFraction = 0.10;
+
+  s5.initial = makeInitial(s5,P,dyn,limits,false);
+  s5.gridConnectedBessTargetKW = 0;
+  s5.titleLines = { ...
+      'Scenario 5 - PV drop plus load increase', ...
+      'Islanded | PV disturbance + critical-load increase'};
+
+Then change:
+
+  scenarios = [s1 s2 s3a s3b s4];
+
+to:
+
+  scenarios = [s1 s2 s3a s3b s4 s5];
+
+
+STEP 2 - ADD THE NEW EVENT LOGIC TO microgrid_vf_sfun.m
+
+Find:
+  function S = scenarioState(...)
+
+Inside its switch SC.id, add:
+
+  case 5
+      S.gridClosed = false;
+      S.pNoncriticalKW = 0.0;
+      S.pCriticalKW = SC.operatingPoint.criticalLoadKW;
+      S.pvAvailableKW = SC.operatingPoint.pvAvailableKW;
+
+      if t >= SC.events.eventTimeS
+          S.pCriticalKW = S.pCriticalKW * ...
+              (1.0 + SC.events.loadIncreaseFraction);
+          S.pvAvailableKW = S.pvAvailableKW * ...
+              (1.0 - SC.events.pvDropFraction);
+      end
+
+      S.pLoadKW = S.pCriticalKW;
+      S.pvTargetKW = S.pvAvailableKW;
+      S.dieselTargetKW = 0.0;
+
+For this example, the normal islanded BESS grid-forming equations in
+update(...) will automatically react to the new power mismatch.
+
+If your new scenario needs special dynamics (for example a diesel breaker
+trip rate, different PV time constant, or custom grid/PCC logic), also add
+an SC.id == 5 condition in update(...).
+
+
+STEP 3 - ADD PLOT EVENT MARKERS
+
+In run_microgrid_vf_scenarios.m find:
+  function addEventLines(ax,SC)
+
+Add:
+
+  case 5
+      xline(ax,SC.events.eventTimeS,':','PV/load disturbance');
+
+
+STEP 4 - DECIDE WHETHER A SPECIAL FOURTH PLOT IS NEEDED
+
+plotScenario(...) currently uses a fourth panel only for IDs 1, 32, and 4.
+A normal new scenario automatically gets frequency, voltage, and source
+power plots.
+
+If Scenario 5 needs an extra panel, extend the conditions in plotScenario.
+Otherwise no change is required.
+
+
+STEP 5 - RUN IT
+---------------
+Run:
+
+  run_microgrid_vf_scenarios
+
+The new case will be included in the results array, provided its scenario is
+included in the scenarios = [...] line. Output is written to vf_results/.
+
+
+D. OUTPUT SIGNALS FROM microgrid_vf_sfun.m
+------------------------------------------
+The S-function currently outputs 16 signals in this fixed order:
+  1  Frequency_Hz
+  2  Voltage_LL_RMS_V
+  3  Grid_kW                 (+ import, - export)
+  4  PV_kW
+  5  BESS_kW                 (+ discharge, - charge)
+  6  Diesel_kW
+  7  CriticalLoad_kW
+  8  NoncriticalLoad_kW
+  9  TotalLoad_kW
+ 10  TotalGeneration_kW
+ 11  PhaseError_deg
+ 12  PCC_Closed
+ 13  PV_Available_kW
+ 14  BESS_GFM_Active
+ 15  Diesel_Active
+ 16  Noncritical_Connected
+
+If you add/remove an output signal, ALL of these must remain consistent:
+  - OutputPort(1).Dimensions in microgrid_vf_sfun.m
+  - block.OutputPort(1).Data in outputs(...)
+  - VariableNames in run_microgrid_vf_scenarios.m
+  - Any plotting code using that signal
+
+
+E. MODEL LIMITATION
+-------------------
+This is a reduced-order average-value V/f model, not a detailed Simscape
+Electrical switching network. It is appropriate for presentation studies of
+islanding, V/f response, power sharing, source loss, and synchronization.
+Do not use it to claim detailed fault current, protection coordination, or
+critical clearing time without a separate EMT/Simscape model and the
+required equipment/feeder parameters.

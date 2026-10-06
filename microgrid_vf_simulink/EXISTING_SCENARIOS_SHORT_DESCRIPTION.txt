@@ -1,0 +1,81 @@
+SHORT DESCRIPTION OF THE EXISTING MICROGRID V/f SCENARIOS
+==========================================================
+
+The package runs five presentation simulations. Scenario IDs 31 and 32 are
+named 3A and 3B, so there are five simulations even though the internal IDs
+are 1, 2, 31, 32, and 4.
+
+
+SCENARIO 1 - GRID LOSS AND ISLANDING
+Internal ID: 1
+Simulation time: 6 s
+Event: Grid/PCC loss at 2.0 s; non-critical load is shed at 2.1 s.
+
+Before the outage, the grid, PV, and BESS supply the feeder and diesel is
+OFF. After grid loss, the BESS becomes the grid-forming source. The
+non-critical load is disconnected 100 ms later and the surviving island
+serves the critical load using PV + BESS. This case demonstrates successful
+transition from grid-connected to islanded operation and load shedding.
+
+
+SCENARIO 2 - +20% CRITICAL-LOAD STEP
+Internal ID: 2
+Simulation time: 6 s
+Event: Critical load increases by 20% at 2.0 s.
+
+The system is already islanded with PV + grid-forming BESS; grid and diesel
+are OFF and non-critical load is disconnected. The sudden load increase
+creates an active-power imbalance and the BESS responds through its droop
+and dispatch dynamics. This case demonstrates frequency/voltage recovery
+following a load disturbance that is still within BESS capability.
+
+
+SCENARIO 3A - 50% PV AVAILABILITY DROP
+Internal ID: 31
+Simulation time: 10 s
+Event: Available PV power falls by 50% at 2.0 s.
+
+The system is islanded with PV + grid-forming BESS and no diesel. The code
+automatically selects a real operating hour where PV initially exceeds the
+critical load, so the BESS is charging before the disturbance. After the PV
+drop, the BESS changes toward discharge and covers the new deficit. This
+case demonstrates renewable-power disturbance rejection and BESS support.
+
+
+SCENARIO 3B - DIESEL TRIP / INSUFFICIENT CAPACITY
+Internal ID: 32
+Simulation time: 4 s
+Event: Diesel generator trips at 2.0 s.
+
+The island is initially supplied by PV + grid-forming BESS + diesel because
+PV and BESS alone are not sufficient for the selected critical-load point.
+When diesel trips, the remaining PV + BESS capacity cannot fully supply the
+load. The resulting sustained power deficit causes frequency/voltage to
+fail to recover normally. This is intentionally the physical-limit case and
+shows that control cannot compensate for insufficient generation capacity.
+
+
+SCENARIO 4 - GRID RESTORATION AND RESYNCHRONIZATION
+Internal ID: 4
+Simulation time: 8 s
+Event: Utility grid becomes available again at 2.0 s, but the PCC remains
+open until synchronization requirements are met.
+
+The microgrid starts islanded with PV + grid-forming BESS. An initial phase
+error of 15 degrees is imposed as a synchronization stress condition. After
+the grid returns, the controller corrects the island frequency/phase. The
+PCC closes only after phase, frequency, and voltage errors remain inside the
+specified synchronization window for the required hold time. This case
+demonstrates controlled reconnection rather than immediate breaker closure.
+
+
+COMMON MODEL NOTES
+------------------
+- Equivalent bus: 400 V line-line, 50 Hz.
+- Grid/PV/BESS/diesel sizes come from the optimizer result file.
+- BESS is the grid-forming source during islanded operation.
+- PV is represented as grid-following active-power generation.
+- Positive BESS power = discharge; negative BESS power = charge.
+- Positive grid power = import; negative grid power = export.
+- The model is reduced-order/average-value and is intended for V/f and
+  power-sharing demonstrations, not detailed EMT fault/CCT analysis.
