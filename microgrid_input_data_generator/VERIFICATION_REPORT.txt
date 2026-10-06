@@ -1,0 +1,126 @@
+PRE-PACKAGE VERIFICATION REPORT
+===============================
+
+Scope
+-----
+The uploaded source code and CSVs were checked against the exact data files
+inside the uploaded microgrid optimizer project before this package was built.
+
+1. OPTIMIZER FILE NAMES AND SCHEMAS: PASS
+-----------------------------------------
+The optimizer loader explicitly expects:
+
+  hourly_feeder_load_profile_spliting.csv
+    datetime, hour, non_critical_load_kW, critical_load_kW, total_load_kW
+
+  loadshedding_schedule_1_year_with_status_flag.csv
+    hour, grid_available, outage_cause
+
+  renewable_relevent_utc06_nasaPowerPoint_Hourly_20250101_20251231.csv
+    YEAR, MO, DY, HR, ALLSKY_SFC_SW_DWN, ALLSKY_SFC_SW_DNI,
+    ALLSKY_SFC_SW_DIFF, T2M, WS10M
+
+All three reference files have exactly 8760 rows.
+
+2. LOAD PROFILE: PASS FOR THE ACTUAL OPTIMIZER CSV
+--------------------------------------------------
+Rows                       : 8760
+First timestamp            : 01-Jan-2025 00:00
+Last timestamp             : 31-Dec-2025 23:00
+Continuous hourly sequence : PASS
+Hour index 1..8760         : PASS
+NaN/Inf                    : none
+Negative load              : none
+Max load-balance error     : 2.27e-13 kW (floating-point roundoff)
+
+Mean total load            : 985.453839 kW
+Peak total load            : 1750.000000 kW
+Minimum total load         : 332.169000 kW
+Load factor                : 0.563116480
+Annual energy              : 8,632,575.632 kWh
+
+Peak critical load         : 259.000000 kW
+Mean critical load         : 193.231849 kW
+Minimum critical load      : 136.500000 kW
+Critical energy share      : 19.608412 %
+Minimum non-critical load  : 169.354000 kW
+
+Facility-based critical-load verification: PASS.
+The critical_load_kW column was independently reconstructed from the uploaded
+config.critical schedules (clinic, water pumps, communications tower, cyclone
+shelter/school) and matches every one of the 8760 optimizer rows to numerical
+roundoff.
+
+Reproducibility finding:
+The uploaded intermediate load_profile_hourly.csv, when scaled using the
+uploaded feeder formula (gamma 1.20, target peak 1.75 MW), does not reproduce
+the exact total_load_kW stochastic realization in the optimizer CSV. The
+seasonal/model shape is consistent, but the hourly stochastic realization is
+different. Therefore the package retains the exact optimizer load CSV as the
+authoritative reference and audits any fresh model rebuild before replacement.
+This prevents optimizer results from being silently paired with a new random
+load year.
+
+3. RENEWABLE UTC -> UTC+6: PASS
+-------------------------------
+Raw NASA rows               : 8784
+Converted 2025 local rows   : 8760
+First local timestamp       : 01-Jan-2025 00:00
+Last local timestamp        : 31-Dec-2025 23:00
+Continuous hourly sequence  : PASS
+NASA -999 missing values    : none in final optimizer data
+
+The raw NASA file was independently shifted +6 h and trimmed to local calendar
+year 2025. Every numeric value in all nine output columns matches the renewable
+CSV currently used by the optimizer.
+
+The separate load-model temperature file also has 8760 rows with identical
+YEAR/MO/DY/HR and its T2M values match the converted renewable T2M values for
+all 8760 hours.
+
+4. GRID AVAILABILITY / LOAD SHEDDING: PASS
+------------------------------------------
+Rows                         : 8760
+Hour index 1..8760           : PASS
+grid_available binary       : PASS
+Flag/cause consistency       : PASS (0 inconsistent rows)
+Unknown outage causes        : none
+
+Available                    : 8002 h
+Unavailable total            : 758 h
+  shedding                   : 671 h
+  maintenance                : 14 h
+  fault                      : 73 h
+
+The two uploaded outage CSVs and the optimizer-project outage CSV are
+byte-for-byte identical.
+
+5. EXACT REFERENCE HASHES
+-------------------------
+hourly_feeder_load_profile_spliting.csv
+  SHA-256 43035f5731385495916ee223e5ccf11bd68a8fb83a07b4f6d664f52ae253cf17
+
+loadshedding_schedule_1_year_with_status_flag.csv
+  SHA-256 b92c0bc5326c4036bfb6c78ed70171f58850057edf7b2dc1e37d58ffa580c95b
+
+renewable_relevent_utc06_nasaPowerPoint_Hourly_20250101_20251231.csv
+  SHA-256 d093777eba0d2ea39e102a83ec2a46276c5c1f9708fe625e29db341b5a31d90e
+
+Raw NASA POWER UTC CSV
+  SHA-256 07e086c66ead71129d44cbb920984c80824e06c8eca1ae2c8e72adbfe06ac17f
+
+Load-model temperature CSV
+  SHA-256 5fc0d7f96e733579a98d74e0075fbfe47b86b1115ec22958c6d00fe4f958d1d8
+
+6. CODE CORRECTIONS INCLUDED
+----------------------------
+- Fixed scale_to_feeder.m metadata field used by plot_daily_demand.m.
+- Standardized feeder output timestamp format for the optimizer loader.
+- Preserved 3-decimal load export and exact critical+noncritical=total balance.
+- Replaced the fragile renewable conversion script with a robust function that
+  locates the NASA header and verifies the full 8760-hour UTC+6 result.
+- Changed the outage generator default filename to the optimizer-required name.
+- Corrected outage summary accounting so final cause tags are mutually exclusive.
+- Added one-command generation plus final verification/audit scripts.
+
+Overall status for the exact optimizer reference inputs: PASS.

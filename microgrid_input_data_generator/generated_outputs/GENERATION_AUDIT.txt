@@ -1,0 +1,15 @@
+GENERATION AUDIT - PACKAGE BUILD STATE
+======================================
+
+The generated_outputs directory is pre-populated with exact copies of the
+three input CSV files currently used by the optimizer.
+
+A fresh MATLAB source rebuild has not been executed inside this packaging
+environment because MATLAB is not installed here. Independent static and
+numeric verification of the supplied CSVs is documented in VERIFICATION_REPORT.txt.
+
+Run:
+    generate_all_optimizer_inputs
+
+inside MATLAB to create generated_outputs/audit_rebuild/, rebuild the source
+models, compare them to the exact optimizer references, and update this audit.
