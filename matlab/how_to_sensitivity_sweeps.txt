@@ -1,0 +1,440 @@
+================================================================================
+HOW TO RUN, SET UP AND CUSTOMISE THE SENSITIVITY SWEEP SCRIPTS
+================================================================================
+
+CONTENTS
+--------
+  1. Prerequisites and setup
+  2. Quick start — run a sweep in one line
+  3. Run all sweeps at once
+  4. What each script sweeps (table)
+  5. How to change the sweep range, step size and number of points
+  6. How to change optimizer speed settings
+  7. How to change the LOLP reliability threshold
+  8. Understanding the output files
+  9. Understanding the plots
+  10. Building a tornado chart from the results
+  11. Troubleshooting
+
+
+================================================================================
+1. PREREQUISITES AND SETUP
+================================================================================
+
+Software:
+  * MATLAB R2019b or later (tested on R2025b)
+  * No toolboxes required
+
+Folder structure — the zip must be extracted so you have:
+
+    matlab/
+    ├── config/
+    │   └── microgridParameters.m        <-- all baseline parameter values
+    ├── components/                      <-- PV, battery, outage, load models
+    ├── dispatch/                        <-- dispatch simulator, economics, policy
+    ├── optimizer/                       <-- GWO, fitness evaluator
+    ├── data/
+    │   ├── hourly_feeder_load_profile_spliting.csv
+    │   ├── loadshedding_schedule_1_year_with_status_flag.csv
+    │   └── renewable_relevent_utc06_nasaPowerPoint_Hourly_20250101_20251231.csv
+    ├── runPvCapexSweep.m
+    ├── runBatteryCapexSweep.m
+    ├── runFuelPriceSweep.m
+    ├── runTariffSweep.m
+    ├── runDiscountRateSweep.m
+    ├── runExportCapSweep.m
+    ├── runLandCostSweepV2.m
+    ├── runLandCostSweep.m               <-- original (blind+aware, PV-only plot)
+    └── runOptimizer.m                   <-- single-point full comparison
+
+Step 1:  Open MATLAB
+Step 2:  cd into the matlab/ folder:
+
+             cd('path/to/matlab')
+
+Step 3:  Run any sweep script (see Section 2 below)
+
+Each script automatically adds config/, components/, dispatch/ and optimizer/
+to the MATLAB path via its own setupPaths() function, so you do NOT need to
+call addpath manually.
+
+
+================================================================================
+2. QUICK START — RUN A SWEEP IN ONE LINE
+================================================================================
+
+From the matlab/ folder, call any script with no arguments to use defaults:
+
+    results = runPvCapexSweep();
+    results = runBatteryCapexSweep();
+    results = runFuelPriceSweep();
+    results = runTariffSweep();
+    results = runDiscountRateSweep();
+    results = runExportCapSweep();
+    results = runLandCostSweepV2();
+
+Each call:
+  - prints progress to the command window
+  - opens a single 3-panel figure (NPC, sizing, regret — all shown together)
+  - saves results/  <sweepName>.mat  and  <sweepName>.png
+  - returns the results struct to the workspace
+
+
+================================================================================
+3. RUN ALL SWEEPS AT ONCE
+================================================================================
+
+    sweepScripts = {@runPvCapexSweep, @runBatteryCapexSweep, ...
+                    @runFuelPriceSweep, @runTariffSweep, ...
+                    @runDiscountRateSweep, @runExportCapSweep, ...
+                    @runLandCostSweepV2};
+    allResults = cell(numel(sweepScripts), 1);
+    for k = 1:numel(sweepScripts)
+        allResults{k} = sweepScripts{k}();
+    end
+
+Estimated total time: ~25-30 minutes (sequential, cold cache).
+
+
+================================================================================
+4. WHAT EACH SCRIPT SWEEPS
+================================================================================
+
+  Script                   Parameter                    Default range        Pts  ~Time
+  ---------------------    -------------------------    -----------------    ---  -----
+  runPvCapexSweep          PV capital cost ($/kWp)      500 : 50 : 850        8   3-4m
+  runBatteryCapexSweep     Battery energy capex ($/kWh) 200 : 25 : 400        9   4-5m
+  runFuelPriceSweep        Diesel fuel (BDT/L)          80 : 10 : 150         8   3-4m
+  runTariffSweep           Grid import tariff (BDT/kWh) 8.0 : 0.5 : 13.0    11   5-6m
+  runDiscountRateSweep     Real discount rate (frac)    0.06 : 0.01 : 0.12    7   3m
+  runExportCapSweep        Transformer rating (kVA)     2000 : 250 : 3000     5   2-3m
+  runLandCostSweepV2       Land cost ($/acre)           0 : 20k : 200k       11   5-6m
+
+All scripts run the outage-AWARE design only, with 50 GWO iterations and
+5 seeds per point. The baseline values for all OTHER parameters come from
+config/microgridParameters.m.
+
+
+================================================================================
+4B. REGRET ANALYSIS (TIER 1) — ADDED TO ALL 7 SCRIPTS
+================================================================================
+
+Every script above now also computes REGRET at each sweep point: the extra
+cost of keeping your fixed base-case design instead of re-sizing for that
+point's parameters.
+
+    regret(x) = NPC_baseDesign(x) - NPC_reoptimized(x)        [should be >= 0]
+
+This costs almost nothing extra — no re-optimization, just one additional
+dispatch/economics evaluation of the FIXED base design at each point, reusing
+the evaluator already built for that point.
+
+--- THE NEW 5th ARGUMENT ---
+
+Every script's signature is now:
+
+    results = runXxxSweep(dataDirectory, sweepVector, numberOfSeeds, ...
+                          lossOfLoadThreshold, basePosition)
+
+basePosition is a 4-element vector: [PV kW, BESS kWh, diesel kW, inverter kW]
+Default: automatically loaded from ./results/optimizerResults.mat using
+results.cells.awareAware.sizing. Run runOptimizer first; no manual sizing update is needed.
+
+Examples:
+
+    % Use the default base design, everything else default:
+    results = runPvCapexSweep();
+
+    % Use a different base design (e.g. from a different LOLP threshold run):
+    results = runPvCapexSweep('./data', [], [], [], [1300, 210, 140, 270]);
+
+    % Custom sweep range AND custom base design:
+    results = runTariffSweep();
+
+The sweep automatically uses the outage-aware sizing saved by runOptimizer.
+You may still pass a 5th basePosition argument only when intentionally testing
+a different fixed reference design.
+
+If you intentionally override basePosition, leave earlier arguments as [] to
+keep their defaults. For normal report runs, do not pass basePosition.
+
+--- WHAT'S IN THE OUTPUT ---
+
+Each results struct now also has:
+
+    results.basePosition        — the fixed [PV, BESS, diesel, inverter] used
+    results.baseNetPresentCost  — NPC of that fixed design at each point
+    results.baseLolp            — LOLP of that fixed design at each point
+    results.baseFeasibility     — whether the fixed design still meets the
+                                   LOLP constraint at each point
+    results.regretUsd           — regret in USD at each point
+    results.regretPercent       — regret as % of the re-optimized NPC
+
+--- WHAT'S IN THE OUTPUT FILES ---
+
+Each script saves ONE figure with all 3 panels stacked together (NPC, sizing,
+regret), shown in a single window as soon as the script runs — no extra
+command needed. Example for PV capex:
+
+    results/pvCapexSweep.mat   — everything, including regret
+    results/pvCapexSweep.png   — ONE image: 3 stacked panels (NPC / sizing / regret)
+
+The regret panel (bottom) plots regret (million USD) vs the swept parameter,
+with a dashed zero line. Points near zero mean the base design was already
+close to optimal there; points far above zero mean re-sizing would have
+saved real money.
+
+--- READING baseFeasibility ---
+
+If results.baseFeasibility is false at some points, the fixed base design
+no longer meets the LOLP constraint there — the "regret" at those points
+partly reflects a reliability shortfall, not just extra cost. Worth flagging
+in your writeup when this happens.
+
+
+================================================================================
+5. HOW TO CHANGE THE SWEEP RANGE, STEP SIZE AND NUMBER OF POINTS
+================================================================================
+
+Every script has this calling signature:
+
+    results = runXxxSweep(dataDirectory, sweepVector, numberOfSeeds, threshold)
+
+The SECOND argument is the sweep vector. Override it to change range/step/points.
+
+--- PV CAPEX ---
+
+  Default:   results = runPvCapexSweep();                  % 500:50:850, 8 pts
+
+  Wider:     results = runPvCapexSweep('./data', 400:50:1000);       % 13 pts
+  Denser:    results = runPvCapexSweep('./data', 550:25:750);        % 9 pts
+  Fewer:     results = runPvCapexSweep('./data', 500:100:900);       % 5 pts
+  Custom:    results = runPvCapexSweep('./data', [500 600 650 700 850]);
+
+--- BATTERY CAPEX ---
+
+  Default:   results = runBatteryCapexSweep();             % 200:25:400, 9 pts
+
+  Wider:     results = runBatteryCapexSweep('./data', 150:25:500);   % 15 pts
+  Fewer:     results = runBatteryCapexSweep('./data', 200:50:400);   % 5 pts
+
+--- DIESEL FUEL PRICE ---
+
+  Default:   results = runFuelPriceSweep();                % 80:10:150, 8 pts
+
+  Denser:    results = runFuelPriceSweep('./data', 80:5:150);        % 15 pts
+  Wider:     results = runFuelPriceSweep('./data', 60:10:180);       % 13 pts
+
+--- GRID IMPORT TARIFF ---
+
+  Default:   results = runTariffSweep();                   % 8:0.5:13, 11 pts
+
+  Wider:     results = runTariffSweep('./data', 6:0.5:15);           % 19 pts
+  Fewer:     results = runTariffSweep('./data', 8:1:13);             % 6 pts
+
+--- DISCOUNT RATE ---
+
+  Default:   results = runDiscountRateSweep();             % 0.06:0.01:0.12, 7 pts
+
+  Wider:     results = runDiscountRateSweep('./data', 0.04:0.01:0.15);  % 12 pts
+  Finer:     results = runDiscountRateSweep('./data', 0.06:0.005:0.12); % 13 pts
+
+--- EXPORT CAP (TRANSFORMER RATING) ---
+
+  Default:   results = runExportCapSweep();                % 2000:250:3000, 5 pts
+
+  Wider:     results = runExportCapSweep('./data', 1500:250:3500);   % 9 pts
+  Denser:    results = runExportCapSweep('./data', 2000:100:3000);   % 11 pts
+
+  NOTE: the x-axis shows export cap in kW = transformer_kVA * 0.80.
+  You pass TRANSFORMER RATING in kVA, not the export cap directly.
+
+--- LAND COST ---
+
+  Default:   results = runLandCostSweepV2();               % 0:20k:200k, 11 pts
+
+  Denser:    results = runLandCostSweepV2('./data', 0:10000:200000); % 21 pts
+  Near base: results = runLandCostSweepV2('./data', 50000:10000:150000); % 11 pts
+  Fewer:     results = runLandCostSweepV2('./data', 0:40000:200000); % 6 pts
+
+
+================================================================================
+6. HOW TO CHANGE OPTIMIZER SPEED SETTINGS
+================================================================================
+
+There are FOUR knobs that trade speed for solution quality:
+
+  Knob                    Where set                              Default (sweep)
+  ----                    ---------                              ---------------
+  Max iterations          SWEEP_MAX_ITERATIONS inside each .m    50
+  Population (wolves)     microgridParameters.m line ~242        20
+  Number of seeds         3rd argument of every sweep script     5
+  In-sample traces        microgridParameters.m line ~257        3
+
+--- REDUCING FURTHER (to go faster) ---
+
+  Priority 1 — reduce seeds (3rd argument):
+      results = runPvCapexSweep('./data', [], 3);   % 3 seeds instead of 5
+
+  Priority 2 — reduce iterations (edit the script):
+      Open e.g. runPvCapexSweep.m, find the line:
+          SWEEP_MAX_ITERATIONS = 50;
+      Change 50 to 30 (the convergence knee is around 30-40).
+
+  Priority 3 — reduce population (edit microgridParameters.m):
+      Change P.optimisation.populationSize from 20 to 15.
+      WARNING: 15 wolves on 4 variables is the absolute floor.
+
+  DO NOT reduce numberOfInSampleTraces below 3. The LOLP estimate
+  becomes too noisy with fewer traces.
+
+--- INCREASING (for publication-quality results) ---
+
+  Restore the original values in microgridParameters.m:
+      P.optimisation.populationSize    = 30;   % line ~242 (currently 20)
+      P.optimisation.maximumIterations = 100;  % line ~243 (currently 75)
+
+  Then in each sweep script, set:
+      SWEEP_MAX_ITERATIONS = 100;
+
+  And call with more seeds:
+      results = runPvCapexSweep('./data', [], 12);
+
+
+================================================================================
+7. HOW TO CHANGE THE LOLP RELIABILITY THRESHOLD
+================================================================================
+
+The 4th argument sets the loss-of-load probability constraint:
+
+    results = runPvCapexSweep('./data', [], [], 0.005);   % stricter: 0.5%
+    results = runPvCapexSweep('./data', [], [], 0.02);    % looser:  2.0%
+
+Default is 0.01 (1%). A tighter constraint forces larger components (higher NPC).
+This applies to all sweep scripts.
+
+
+================================================================================
+8. UNDERSTANDING THE OUTPUT FILES
+================================================================================
+
+Each sweep saves TWO files in the results/ folder:
+
+  results/<sweepName>.mat    — MATLAB workspace with the results struct
+  results/<sweepName>.png    — ONE image, 3 stacked panels (NPC / sizing / regret)
+
+To reload and explore:
+
+    load('results/pvCapexSweep.mat');    % loads variable 'results'
+
+    results.sweepVector          % the x-axis values
+    results.netPresentCost       % NPC in USD at each point
+    results.pvKilowatts          % optimal PV at each point
+    results.batteryKilowattHours % optimal battery at each point
+    results.dieselKilowatts      % optimal diesel at each point
+    results.inverterKilowatts    % optimal inverter at each point
+    results.lcoe                 % levelised cost (USD/kWh)
+    results.lolp                 % achieved LOLP at each point
+    results.feasibility          % true if LOLP constraint was met
+    results.sizing               % full sizing struct array
+
+    % Example: plot battery vs PV capex
+    plot(results.sweepVector, results.batteryKilowattHours, '-o');
+    xlabel('PV capex ($/kWp)'); ylabel('Battery (kWh)');
+
+
+================================================================================
+9. UNDERSTANDING THE PLOTS
+================================================================================
+
+Each figure has THREE panels, stacked together in one window:
+
+  PANEL 1 (top) — NPC vs parameter:
+    * Slope = price sensitivity. Steep = high-leverage parameter.
+    * Flat = the parameter barely moves the system cost.
+    * Use this to rank which assumptions matter most.
+
+  PANEL 2 (middle) — all 4 sizing variables vs parameter:
+    * Left y-axis (blue): PV (kWp), Diesel (kW), Inverter (kW)
+    * Right y-axis (orange): Battery (kWh)
+    * Watch for SUBSTITUTION: expensive PV -> optimizer buys more battery.
+    * Watch for DESIGN SWITCHES: sharp jumps mean a different configuration.
+    * Small wiggles (< 5%) are GWO stochastic noise, not real physics.
+
+  PANEL 3 (bottom) — regret of the fixed base design vs parameter:
+    * Regret = NPC of keeping basePosition fixed minus the re-optimized NPC.
+    * Dashed line at zero. Points above it are what re-sizing would have saved.
+    * Near zero = the base design was already close to optimal there.
+
+
+================================================================================
+10. BUILDING A TORNADO CHART FROM THE RESULTS
+================================================================================
+
+A tornado chart ranks parameters by their NPC impact.
+After running all 7 sweeps, load each result and compute the NPC swing:
+
+    files = {'pvCapexSweep', 'batteryCapexSweep', 'fuelPriceSweep', ...
+             'tariffSweep', 'discountRateSweep', 'exportCapSweep', ...
+             'landCostSweepV2'};
+    labels = {'PV capex', 'Battery capex', 'Fuel price', ...
+              'Import tariff', 'Discount rate', 'Export cap', 'Land cost'};
+
+    npcLow  = zeros(numel(files), 1);
+    npcHigh = zeros(numel(files), 1);
+    npcBase = zeros(numel(files), 1);
+
+    for k = 1:numel(files)
+        load(fullfile('results', [files{k} '.mat']), 'results');
+        npcLow(k)  = results.netPresentCost(1);          % low end of range
+        npcHigh(k) = results.netPresentCost(end);         % high end of range
+        % Find the point closest to the baseline value
+        % (approximate: use the midpoint of the sweep)
+        mid = round(numel(results.netPresentCost) / 2);
+        npcBase(k) = results.netPresentCost(mid);
+    end
+
+    swing = npcHigh - npcLow;
+    [~, order] = sort(abs(swing));
+    figure; barh(swing(order) / 1e6);
+    set(gca, 'YTickLabel', labels(order));
+    xlabel('NPC swing across sweep range (million USD)');
+    title('Tornado chart — parameter sensitivity ranking');
+
+
+================================================================================
+11. TROUBLESHOOTING
+================================================================================
+
+T1. "Undefined function 'loadFeederInputs'"
+    You are not in the matlab/ folder. Run:  cd('path/to/matlab')
+    Or call:  run('runPvCapexSweep')  from any folder.
+
+T2. NaN in results.pvKilowatts or other arrays
+    The GWO returned an infeasible best-of-seeds at that point.
+    Fix: increase numberOfSeeds (3rd argument) from 5 to 8 or 10.
+
+T3. results.feasibility shows false at some points
+    The LOLP constraint was violated — the optimizer could not find a
+    feasible design with the given budget of seeds/iterations.
+    Fix: increase seeds, or loosen the LOLP threshold (4th argument).
+
+T4. PNG did not save
+    Some MATLAB installs cannot export figures without a display.
+    The .mat file still has everything — rebuild the plot from it.
+
+T5. Sweep is too slow
+    See Section 6. Reduce seeds first (3rd argument), then iterations.
+
+T6. I want to sweep a parameter not listed here
+    Copy any sweep script, rename it, and change the ONE line inside the
+    loop that overrides P. For example, to sweep battery cycle life:
+
+        Ppoint = P;
+        Ppoint.battery.ratedCycleLifeAtEightyPercentDepth = thisValue;
+
+    The rest of the script stays identical.
+
+T7. I want to change the BASELINE of a non-swept parameter
+    Edit config/microgridParameters.m, find the parameter, change its value,
+    and rerun the sweep. All sweeps read from microgridParameters.m.

@@ -1,0 +1,588 @@
+================================================================================
+ASSUMPTIONS AND VALUES
+Grid-connected microgrid sizing, 1.5 MW distribution feeder, Feni, Bangladesh
+================================================================================
+
+Every value in config/microgridParameters.m is listed here with its source and,
+where it is uncertain, its sweep range.
+
+STATUS KEY
+  [SOURCED]   traced to a primary or named secondary source
+  [DERIVED]   computed from the input data, not asserted
+  [ASSUMED]   no source found; a judgement call, always swept
+  [DECISION]  a modelling choice made in review, with the reasoning given
+
+The single most important line in this file: values marked [ASSUMED] must not be
+quoted in a paper as though they were measured. Several of them - land price
+above all - have more leverage over the result than anything that is sourced.
+
+================================================================================
+1. SITE
+================================================================================
+latitudeDegreesNorth                22.95           [SOURCED] Feni district centroid
+longitudeDegreesEast                91.40           [SOURCED] same
+standardMeridianDegreesEast         90.00           [SOURCED] Bangladesh Standard Time
+elevationMetresAboveSeaLevel        8               [SOURCED] NASA SRTM, alluvial plain
+utcOffsetHours                      +6              [SOURCED] no daylight saving
+arrayTiltDegrees                    23              [DECISION] approx. latitude; sweep 15/23/25
+arrayAzimuthDegrees                 180 (due south) [SOURCED] northern-hemisphere standard
+tracking                            fixed           [DECISION] tracking adds capex, O&M and
+                                                    failure modes for ~15-20% yield; not
+                                                    deployed at BD distribution scale
+calendarYear                        2025            non-leap; matches all three input files
+
+ACTION ITEM: replace the district centroid with the actual substation
+coordinates for the NASA POWER pull.
+
+--------------------------------------------------------------------------------
+TIMEZONE - THE MOST DANGEROUS LINE IN THE STUDY
+--------------------------------------------------------------------------------
+The original brief instructs a +6 hour shift on NASA POWER data. DO NOT APPLY IT
+TO THIS FILE. The supplied solar file is ALREADY in Bangladesh local time.
+
+Evidence: annual-mean global horizontal irradiance peaks in the hour-11 bin;
+daylight runs hours 5-18; true solar noon at 91.4 deg east under a 90 deg east
+standard meridian falls at 11:54, i.e. inside the hour-11 bin. Applying a further
++6 h shift would move the modelled solar peak to 17:00 and invalidate every
+downstream result in a way that is very hard to spot.
+
+loadFeederInputs.m RAISES AN ERROR rather than warning if this check fails.
+
+================================================================================
+2. LOAD  (all [DERIVED] from the supplied 8760-hour profile)
+================================================================================
+annualEnergy                        8,633 MWh
+peakLoad                            1,750 kW    (assumptions doc said ~1,700;
+                                                 the data says 1,750 - use the data)
+peakCriticalLoad                    259 kW
+meanCriticalLoad                    193 kW
+criticalShareOfAnnualEnergy         19.6%
+loadFactor                          0.563
+
+CORRECTION TO THE ASSUMPTIONS DOC: it specifies a flat 30% critical fraction.
+The supplied file gives a TIME-VARYING critical load averaging 21% of total and
+peaking at 259 kW, which matches the "life-safety ~265 kW" tier in Table 3, not
+the 30% figure. The file is used; the 30% assumption is dropped. A time-varying
+fraction is the stronger choice anyway.
+
+LOAD FACTOR IS AN OUTPUT, NOT AN INPUT. It is computed as
+(annualEnergy/8760)/peakLoad and reported at whatever value falls out. 0.563
+happens to sit inside the 0.45-0.60 plausibility band for a single rural feeder.
+
+================================================================================
+3. OUTAGE MODEL
+================================================================================
+Fitted to the ONE supplied historical trace. Statistics of that trace:
+
+  grid unavailability               758 h/yr (8.65%)
+  shedding                          619 events, 671 h, mean 1.08 h, MAX 2 h
+  fault                             11 events, 73 h, mean 6.6 h, max 13 h
+  maintenance                       2 events, 14 h, 7 h each, daytime
+  longest continuous outage         13 h
+
+TWO CORRECTIONS TO THE BRIEF:
+
+(a) THERE ARE FOUR OUTAGE CAUSES, not three. The trace contains
+    'maintenance' as well as none/shedding/fault. It behaves as a hybrid:
+    announced in advance like shedding, but 7 hours long like a fault.
+    [DECISION] treated as FORESEEABLE for the reserve policy, fault-length for
+    energy sizing, refill permitted beforehand.
+
+(b) SHEDDING IS 1-2 HOUR BLOCKS, NOT SIX-HOUR DAILY BLOCKS. The brief predicts
+    "diesel will likely dominate... six hours of daily shedding is a lot of
+    energy for batteries to cover". The actual trace is 619 events averaging
+    1.08 h. A two-hour critical-bus island at ~220 kW is about 440 kWh, well
+    within a modest battery. Diesel is sized by the 13-hour fault and the
+    72-hour stress case, NOT by shedding. This inverts the expected result.
+
+SAMPLER STRUCTURE
+  shedding      inhomogeneous Poisson, separable month x hour-of-day intensity
+                (marginal-product form), empirical duration distribution
+  fault         homogeneous Poisson, empirical duration
+                [DECISION] CONSTANT arrival rate, not seasonal. Eleven observed
+                events cannot support twelve monthly rates without fitting this
+                particular year's pre-monsoon cluster as though it were structure.
+  maintenance   homogeneous Poisson, daytime start, fixed 7 h duration
+
+NON-OVERLAP PLACEMENT AND CALIBRATION [DECISION]
+  Same-cause events are placed without overlapping OR abutting. Without that
+  rule, two independently sampled one-hour shedding blocks landing in
+  consecutive hours merge into an indistinguishable two-hour block; since the
+  historical durations were themselves measured as contiguous runs, the
+  inflation compounds on every resample and sampled traces end up containing
+  six-hour shedding events that exist nowhere in the data.
+  Rejection thins the arrival process, corrected by intensity multipliers solved
+  by fixed-point moment matching at fit time (~1.16 shedding, ~1.08 fault).
+
+  Verification, 200 sampled years vs the historical one:
+    unavailability   8.64%  vs  8.65%
+    shedding hours     667  vs    671
+    fault hours         75  vs     73
+    mean shedding duration 1.08 h vs 1.08 h
+    worst continuous outage reaches 18 h vs the single year's 13 h - the sampler
+    explores tail events the one historical year happened to miss, which is
+    exactly what the held-out evaluation needs to be worth running.
+
+CAUSE PRIORITY on overlap: fault > maintenance > shedding. Under-reporting
+shedding this way is conservative: it stops the forewarning variant claiming
+credit for hours no roster foresaw.
+
+TRACE SETS
+  in-sample    5 traces, seed 20250101, used in fitness
+  held-out     100 traces, seed 77777777, SEALED - never used in fitness
+  counterfactual  all-hours-available, used ONLY by the outage-blind design
+
+================================================================================
+4. SOLAR RESOURCE AND PHOTOVOLTAIC MODEL
+================================================================================
+annual global horizontal            1,697 kWh/m2   [DERIVED] from the supplied file
+annual plane of array               1,787 kWh/m2   [DERIVED] Perez, 23 deg tilt (+5.3%)
+specific yield                      1,326 kWh/kWp  [DERIVED]
+capacityFactor                      0.151          [DERIVED] inside the 0.15-0.19 band
+outputWeightedCellTemperature       46.8 degC      [DERIVED]
+
+soilingLossFraction                 3%       [DECISION] sweep 3-8%
+                                    Revised from 5% by instruction. At 5% the
+                                    capacity factor came out at 0.148, below the
+                                    published Bangladesh band; at 3% it is 0.151,
+                                    inside it. The SOILING ASSUMPTION was moved,
+                                    NOT the derate fudged to hit a target.
+                                    3% assumes monsoon rain does most of the
+                                    cleaning; a dustier site is covered by the sweep.
+
+directCurrentSystemDerateFraction   0.84     [SOURCED] NREL PVWatts v5 taxonomy
+                                    soiling 3 + shading 3 + mismatch 2 + wiring 2
+                                    + connections 0.5 + light-induced degradation
+                                    1.5 + nameplate 1 + availability 3 = 16%
+                                    sweep 0.79-0.86
+
+  *** THE 0.84 DERATE EXCLUDES TEMPERATURE AND INVERTER EFFICIENCY. ***
+  Temperature is handled once, in the NOCT cell-temperature model. Inverter
+  efficiency is handled once, as its own 97% factor. Reading 0.84 as an all-in
+  derate and then applying temperature and inverter losses on top would
+  double-count. photovoltaicModel.m is written so that halving the derate halves
+  the annual output EXACTLY; if it does not, something has crept in.
+
+temperatureCoefficientOfPower       -0.4 %/degC    [SOURCED] tier-1 module datasheet
+nominalOperatingCellTemperature     45 degC        [SOURCED] generic tier-1
+inverterEfficiencyFraction          97%            [SOURCED] datasheet; sweep 96-98%
+annualDegradationRate               0.5 %/yr       [SOURCED] Jordan et al. 2016; sweep 0.3-0.7
+serviceLifeYears                    25             [SOURCED] matches horizon, no replacement
+moduleEfficiency                    20%            [SOURCED] mono-PERC/TOPCon
+
+TRANSPOSITION MODEL: Perez et al. (1990), all-sites composite coefficients.
+SOLAR POSITION: Michalsky/PSA formulation, accurate to ~0.01 deg, evaluated at
+the MIDPOINT of each hour. NASA POWER values are hour-averaged and labelled by
+the hour they start; evaluating geometry at the label would bias the sun position
+half an hour early all year and distort the morning and evening shoulders.
+
+LIMITATION: only ONE weather year (2025) is supplied. The brief asks for a TMY
+plus at least three historical years for weather sensitivity. Not possible with
+the data on hand - declare in Limitations or pull more NASA POWER years.
+
+================================================================================
+5. BATTERY
+================================================================================
+roundTripEfficiencyFraction         90%      [SOURCED] LFP datasheet; sweep 85-93%
+                                    NREL ATB 2024 uses a more conservative 85%;
+                                    90% is reasonable for a modern commercial LFP
+                                    system but optimistic against NREL's own
+                                    assumption, hence the 85% sweep floor.
+stateOfChargeMinimumFraction        10%      [SOURCED] warranty floor; sweep 5-20%
+stateOfChargeMaximumFraction        95%      [SOURCED] manufacturer; sweep 90-100%
+stateOfChargeIslandFloorFraction    15%      [ASSUMED] minimum + margin for
+                                             grid-forming voltage/frequency hold
+stateOfChargeInitialFraction        50%      [DECISION] neutral start
+maximumChargeRatePerHour            0.5C     [SOURCED] LFP typical; sweep 0.25-1C
+ratedCycleLife                      5,500 @ 80% DoD  [SOURCED] CATL/BYD; sweep 4,000-7,000
+calendarLifeYears                   12       [SOURCED] LFP datasheet; sweep 10-15
+
+THREE DISTINCT SOC THRESHOLDS, kept separate in code and never collapsed:
+  stateOfChargeMinimum      hard physical/warranty floor, never violated
+  stateOfChargeIslandFloor  floor while islanded; below it the unit cannot
+                            reliably hold the voltage/frequency reference
+  reserveStateOfCharge(t)   grid-connected dispatch floor; THE POLICY VARIABLE
+                            that separates the blind and aware designs
+
+================================================================================
+6. DIESEL GENERATOR
+================================================================================
+fuelCurveIntercept                  0.08 L/h per rated kW  [SOURCED] Skarstein &
+                                                           Uhlen 1989; HOMER default
+fuelCurveSlope                      0.25 L/kWh output      [SOURCED] same
+minimumLoadingFraction              30%      [SOURCED] manufacturer; sweep 25-40%
+                                    Never violated. Wet stacking is a real failure
+                                    mode; allowing 5% loading would flatter diesel.
+overhaulIntervalRunningHours        15,000   [SOURCED] Cummins/CAT; sweep 12,000-20,000
+                                    Driven by RUNNING HOURS, not calendar years.
+fuelTankCapacityLitres              5,000    [SOURCED] sized to a 72 h stress case;
+                                             sweep 2,500/5,000/10,000
+fuelRefillRate                      tank/24 h [DECISION] refills over 24 h once
+                                             supply is restored; NO refill while
+                                             islanded, which is what makes long
+                                             fault outages bite
+carbonDioxideEmissionFactor         2.68 kgCO2/L  [SOURCED] IPCC default
+
+availableRatingsKilowatts   [0 100 125 150 200 250 300 400 500]   [DECISION]
+  CORRECTION TO THE BRIEF: its 0-1500 kW range is absurd against a 259 kW
+  critical bus. Trimmed to plausible ratings, plus a zero option so the
+  optimizer can decline diesel entirely.
+
+isGridFormingCapable                true     [DECISION]
+  The brief offers two options. Option (a) - the genset is grid-forming capable
+  and assumes the reference if the battery floors out - is chosen because it
+  reflects real installations and is easier to defend. Consequence: island
+  serving capacity is inverter rating PLUS generator rating.
+
+================================================================================
+7. GRID-FORMING INVERTER
+================================================================================
+conversionEfficiencyFraction        96%      [SOURCED] datasheet
+serviceLifeYears                    15       [SOURCED] SMA/Sungrow; sweep 12-20
+                                             One replacement within the horizon.
+
+*** THE BRIEF'S JUSTIFICATION FOR THIS DECISION VARIABLE DOES NOT SURVIVE THE
+    DATA, AND THE WRITE-UP MUST BE CHANGED TO MATCH. ***
+The brief says the inverter is independent because "in islanded mode it must
+carry the entire served load". But served load while islanded is CRITICAL load
+only, capped at 259 kW, while the brief's search range runs to 1,500 kW. The
+islanding constraint therefore never binds anywhere near the upper bound, and
+the inverter is in practice sized by BATTERY THROUGHPUT in grid-connected mode.
+Bounds narrowed to 259-1,000 kW with 259 kW enforced as the islanding floor.
+Restate as "sized by grid-connected battery power with an islanding floor".
+
+================================================================================
+8. TARIFF AND NET METERING
+================================================================================
+importTariffBdtPerKilowattHour      8.60     [ASSUMED] sweep 8-13
+  *** HIGHEST-LEVERAGE MISSING INPUT AFTER LAND. *** The assumptions doc
+  correctly refuses to give a point estimate: the previous ~10.0 BDT/kWh figure
+  rested on an invented 60/15/15/10 class-share split with no source. 8.60 is
+  chosen as a working value for the feeder's stated residential+irrigation-heavy
+  character. The correct method is sum(w_i * r_i) where w_i is each class's
+  actual share of annual feeder ENERGY (kWh, not customer count).
+  ACTION ITEM: obtain the feeder's customer-class energy breakdown.
+
+exportCreditBdtPerKilowattHour      8.39     [SOURCED] BERC June 2026 bulk tariff
+                                             order; NMG 2025 s.3.5(b); sweep 6.5-9.5
+settlementPeriodMonths              3        [SOURCED] NMG 2025 s.3.5(f) gazette text
+exportPowerCapKilowatts             1,600    [DECISION] 80% of a 2.0 MVA dedicated
+                                             interconnection transformer, per
+                                             NMG 2025 s.3.3(c) for MT customers.
+                                             ACTION ITEM: confirm transformer rating.
+demandChargeBdtPerKvaMonth          42       [ASSUMED] applied to the plant's
+                                             monthly peak import as an MT customer
+assumedPowerFactor                  0.95     [ASSUMED]
+peakPeriod                          17:00-23:00  [SOURCED] BERC June 2026
+billingMultiplier                   1.05 x 0.95  [SOURCED] 5% VAT, 5% on-time rebate
+gridEmissionFactor                  0.67 kgCO2/kWh  [SOURCED] IGES, Bangladesh 2022
+
+FINDING: this feeder imports far more than it exports in EVERY quarter, so
+export always settles at the RETAIL rate and the 8.39 bulk rate never applies.
+Annual export at 1,500 kW of photovoltaic is about 639 kWh against a 1,600 kW
+cap. The export credit rate - which the brief expects to be the single most
+influential sensitivity parameter - does almost nothing until the array exceeds
+roughly 2,000 kW. Reportable result, not a modelling shortcut.
+
+================================================================================
+9. COSTS AND FINANCE
+================================================================================
+realDiscountRateFraction            9%       [SOURCED] World Bank BD CPI + equity
+                                             risk premium; sweep 6-12%
+projectHorizonYears                 25       [SOURCED] conventional for infrastructure
+bangladeshiTakaPerUsDollar          122      [SOURCED] Bangladesh Bank mid-2026;
+                                             sweep 110-135
+
+*** DISCOUNTING IS REAL, NOT NOMINAL, AND ESCALATION MATCHES. ***
+dieselFuelRealEscalationRate        2.5 %/yr real   [ASSUMED] sweep 0-5%
+gridTariffRealEscalationRate        3.0 %/yr real   [SOURCED] BERC revision pattern
+  These are REAL rates: diesel and electricity rise that much FASTER than
+  general inflation. Diesel ends at 1.85x its starting real price over 25 years,
+  which is aggressive - hence the sweep. Mixing a real discount rate with
+  nominal escalation, or the reverse, is the classic way to get a net present
+  cost wrong by tens of percent.
+
+photovoltaicCapitalCost             $650/kWp    [SOURCED] IRENA RPGC 2024 global
+                                                weighted average $691/kW; sweep 500-850
+                                                The claim that Bangladesh runs below
+                                                global average on Chinese supply-chain
+                                                proximity is an INFERENCE, not shown -
+                                                dropped unless a local quote confirms it.
+photovoltaicOperationCost           $12/kW-yr   [SOURCED] IRENA Asia average
+batteryEnergyCapitalCost            $280/kWh    [ASSUMED] sweep 200-400
+                                                Framed as a Bangladesh-DELIVERED
+                                                estimate (duties, financing, small
+                                                project scale) above IRENA's $192/kWh
+                                                global average. NOT "the NREL value".
+batteryPowerConversionCapitalCost   $120/kW     [SOURCED] NREL ATB 2024b; PNNL
+gridFormingPremiumOnPowerConversion +20%        [ASSUMED] sweep 10-30%
+                                                No public grid-forming-specific
+                                                benchmark exists. WEAKEST CAPEX LINE.
+                                                ACTION ITEM: budgetary quote from SMA,
+                                                Sungrow, EPC Power or Hitachi Energy.
+dieselGeneratorCapitalCost          $350/kW     [SOURCED] Cummins/Perkins; sweep 300-500
+dieselFuelPrice                     115 BDT/L   [SOURCED] BPC administered, Jun 2026;
+                                                sweep 80-150
+
+BATTERY/GRID-FORMING COST STRUCTURE - ONE PATH ONLY:
+    C = energy($/kWh x kWh) + power($/kW x kW) x (1 + gridFormingPremium)
+  with balance-of-system/engineering applied ONCE at system level. An earlier
+  structure carried both a "grid-forming premium" and a separate "grid-forming
+  inverter all-in $/kW", which were two ways of computing the same number and
+  risked being summed.
+
+--------------------------------------------------------------------------------
+LAND - THE HIGHEST-LEVERAGE ASSUMPTION IN THE STUDY
+--------------------------------------------------------------------------------
+landAreaAcresPerMegawattPeak        3        [SOURCED] The Business Standard, Apr
+                                             2025: BD utility solar needs 3-4
+                                             acres/MW; sweep 3-4
+landPurchaseCostUsdPerAcre          $90,000  [ASSUMED] MARKET price; sweep 40k-160k
+  No published per-acre figure for rural Feni was found. Triangulated two ways:
+   (a) ACWA Power stated land acquisition and development is ~30% of total
+       project cost for the 900-acre Rampal plant. Back-solving against $650/kWp
+       of equipment at 3 acres/MW implies roughly $93,000/acre.
+   (b) Land in Feni district (1,665 people/km2) transacts around BDT 0.5-2 lakh
+       per decimal, i.e. $41,000-164,000/acre at 122 BDT/$.
+  The two ranges overlap near $90,000/acre.
+
+landAcquisitionPremiumMultiplier    2.0x     [ASSUMED] sweep 1.5-2.5x
+  What is actually PAID is roughly double market: stamp duty and registration,
+  the premium needed to aggregate many small holdings from unwilling sellers,
+  and district-level facilitation payments that developers report. Applied to
+  ACQUISITION only, never to the lease alternative.
+
+landRealAppreciationRatePerYear     6%       [ASSUMED] sweep 3-9%
+  Land in Bangladesh has historically outrun general inflation, so treating it
+  as nominally flat understates the residual badly.
+  *** WHAT DRIVES THE RESULT IS THE GAP BETWEEN THIS RATE AND THE DISCOUNT
+      RATE, NOT EITHER RATE ALONE. *** At 9% appreciation, growth exactly
+  cancels 9% discounting and land is FREE in net present cost terms except for
+  the acquisition premium. Sweep the SPREAD, not the two rates independently,
+  and say so in Methods.
+
+landSalvage                         at MARKET value, grown at the real
+                                    appreciation rate, then discounted.
+                                    NOT at the acquisition-inflated price: the
+                                    premium buys permission and assembly and
+                                    cannot be resold.
+
+landLeaseCostUsdPerAcreYear         $5,400   [ASSUMED] ~6% of purchase price
+                                    Leasing avoids the premium AND the
+                                    appreciation question at once, and spreads
+                                    the outlay so it discounts more favourably.
+                                    BOTH TENURES SHOULD BE REPORTED.
+
+EFFECT (measured, not asserted). Effective land cost as a multiple of market:
+    premium  appreciation   paid   salvage PV    net   optimal PV
+      1.0x        0%        1.00      0.12       0.88     1,800 kW
+      2.0x        3%        2.00      0.24       1.76       500 kW
+      2.0x        6%        2.00      0.50       1.50       600 kW
+      2.0x        9%        2.00      1.00       1.00     1,400 kW
+      2.5x        6%        2.50      0.50       2.00       400 kW
+  Across the plausible range the optimal array swings by a factor of five. This
+  is now the highest-leverage unknown in the study, AHEAD of the export credit
+  rate the brief expected to dominate.
+
+LEGAL CAVEAT FOR THE LIMITATIONS SECTION: Bangladesh restricts converting
+cultivable agricultural land to non-agricultural use, and solar developers
+report this as a binding obstacle. A 9-acre array at the 3,000 kW upper bound
+may not be permittable on this feeder at all. THE MODEL PRICES LAND; IT DOES NOT
+MODEL WHETHER PERMISSION WOULD BE GRANTED.
+
+ROOFTOP ALTERNATIVE, considered and NOT implemented: rooftop photovoltaic under
+standard net metering uses grid-FOLLOWING inverters with anti-islanding
+protection, so it contributes EXACTLY ZERO during every outage - which is the
+entire reason this microgrid exists. Rooftop can replace the grid-connected
+arbitrage role but not the islanding role. If pursued, model it as an exogenous
+reduction in the load profile, not as a supply-side decision variable.
+
+--------------------------------------------------------------------------------
+VALUE OF LOST LOAD
+--------------------------------------------------------------------------------
+valueOfLostLoadCritical             $10/kWh   [SOURCED] Schroder & Kuckshinrichs
+                                              2015; sweep 5-20
+valueOfLostLoadNonCritical          $1/kWh    [SOURCED] same; sweep 0.5-3
+  REPORTED SEPARATELY, NEVER FOLDED INTO NET PRESENT COST. The optimisation
+  constrains loss-of-load probability, so pricing unserved energy in the
+  objective as well would penalise the same failure twice and quietly change
+  what is being optimised.
+
+================================================================================
+10. OPTIMISATION
+================================================================================
+DECISION VARIABLES AND BOUNDS
+  photovoltaicCapacityKilowatts        0 - 3,000    continuous
+  batteryEnergyCapacityKilowattHours   0 - 6,000    continuous
+  generatorRatingKilowatts             0 - 500      integer, from catalogue
+  inverterRatingKilowatts            259 - 1,000    continuous
+  (last two both narrowed from the brief - see sections 6 and 7)
+
+populationSize                      30       [DERIVED] justified by the convergence
+maximumIterations                   100      [DERIVED] study, not inherited:
+                                             99% of total gain is captured by
+                                             iteration 16-36; last improvement of
+                                             any size lands around iteration 112-116.
+independentRuns                     30       12 already resolve the design gap by
+                                             1,528:1; 30 is comfortable, not necessary.
+
+lossOfLoadProbabilityThresholds     0.5, 1, 2, 5, 10 %
+  Applied to CRITICAL LOAD ONLY. Non-critical load is shed during islanding; its
+  unserved energy is reported but not constrained. At 1.5 MW peak the full
+  feeder cannot be economically islanded.
+  DEFINITION: HOURS-BASED - hours in which any critical load went unserved,
+  divided by 8760. The energy-based companion (criticalEnergyIndex) is reported
+  alongside because the two differ by roughly an order of magnitude here and a
+  reader will otherwise assume whichever makes the number look worse.
+
+CONSTRAINT PENALTY [DECISION - CHANGED FROM THE BRIEF]
+  penalty = 2.0e9 * violation + 5.0e10 * violation^2
+  The brief specified a PURE QUADRATIC. Tested at realistic magnitudes it is far
+  too weak exactly where it matters: at a weight of 5e8, a solution violating
+  the threshold by 0.001 - one hour in a thousand - picks up a penalty of $500
+  against an $8M objective and would come back as the winner while being
+  infeasible. The quadratic only bites on gross violations, which the optimizer
+  would have discarded anyway. The linear term makes that same violation cost
+  $2M, exceeding the entire spread of net present cost across the feasible
+  space. The winner's feasibility is VERIFIED and printed in every run.
+
+CATALOGUE SNAPPING happens inside fitness evaluation ONLY. The wolf's stored
+position stays continuous so the search landscape is not a staircase.
+
+CACHING [DECISION - TWO BUG FIXES WORTH READING]
+  (a) The cache key rounds to 1 kW AND THE EVALUATED SIZING IS QUANTISED TO THE
+  SAME GRID. Those two must go together. An earlier version rounded only the key
+  while leaving the sizing continuous, so 432.2 kW and 432.4 kW shared a cache
+  entry while being different systems, and whichever was evaluated first had its
+  result silently returned for the other. THE BUG IS INVISIBLE IN AGGREGATE -
+  the optimizer still converges and every number still looks plausible - which
+  is precisely what makes it dangerous. Quantising makes the cache LOSSLESS: one
+  key, one system, one answer.
+
+  (b) THE EVALUATOR (AND HENCE ITS CACHE) MUST NEVER BE SAVED. It is threaded
+  through the optimizer to let later seeds reuse earlier seeds' work, and it
+  grows by one entry per fitness call across all 100 iterations x 30 population
+  x 12 seeds - many thousands of entries by the end of a run. greyWolfOptimizer.m
+  returns it as a SECOND, separate output for exactly this reason: an earlier
+  version attached it as result.evaluator, which meant every one of the 24
+  saved per-seed run structs carried the entire accumulated cache, and -v7.3
+  (HDF5) has real per-entry overhead for a containers.Map holding heterogeneous
+  structs. That turned a results file that should be a few megabytes into
+  roughly 900 MB. Thread the evaluator through a LOCAL variable between calls;
+  never assign it into anything you intend to save.
+
+================================================================================
+11. DISPATCH RULES
+================================================================================
+Rule-based two-mode state machine. Deterministic, no solver.
+
+GRID-CONNECTED: photovoltaic serves load -> surplus charges battery -> exports
+subject to cap -> curtail; deficit met by battery down to reserveStateOfCharge(t)
+-> grid import -> STEP 7 -> generator never runs.
+
+*** STEP 7 IS AN ADDITION TO THE BRIEF AND IT IS NOT COSMETIC. ***
+  If the state of charge is BELOW reserveStateOfCharge(t) and the hour is
+  off-peak, import enough to reach the reserve target.
+  The brief's grid-connected rules contain NO path by which the battery is ever
+  charged from the grid, so the only charging source is photovoltaic surplus. On
+  this feeder that surplus is rare - mean load 985 kW against 227 kW mean output
+  from a 1,500 kW array - so the battery completes about 68 equivalent full
+  cycles a year and can almost never REACH a raised reserve target. That makes
+  the outage-aware reserve policy close to unactuatable, and it contradicts the
+  brief's own description of a battery that "arbitrages freely against the
+  tariff", since without grid charging there is no arbitrage.
+  With step 7 the aware policy's fuel saving on identical hardware rises from 9%
+  to 24%. It is deliberately the MINIMAL version: charge only to the reserve
+  target, only off-peak, never above it. Full tariff arbitrage is NOT enabled.
+
+ISLANDED: disconnect non-critical -> photovoltaic serves critical bus -> battery
+down to stateOfChargeIslandFloor -> generator (min loading, fuel limited) ->
+shed further -> record unserved critical BY CAUSE -> surplus charges battery,
+remainder curtailed.
+
+  Reference holding: the generator takes the voltage/frequency reference if the
+  battery reaches its island floor, so island serving capacity is inverter
+  rating PLUS generator rating.
+  Headroom both ways: with the generator at 30% minimum loading and critical
+  load below that, the surplus charges the battery or is curtailed. Reported as
+  islanded curtailment, not absorbed into a slack variable.
+
+ENERGY BALANCE, audited every hour:
+  photovoltaic + batteryDischarge + generator + gridImport
+    = servedLoad + batteryCharge + gridExport + curtailed
+  Curtailment is a SINGLE bucket carrying both photovoltaic spill and generator
+  minimum-loading surplus; splitting them would leave the balance open.
+  The reference implementation closes this to 1e-13 kW in the worst hour.
+
+WHY RULE-BASED, NOT MODEL-PREDICTIVE CONTROL [DECISION]
+  Rule-based is what actually gets deployed, is transparent to a reviewer, and
+  needs no solver in the loop. MPC would improve results but adds a forecast
+  model, a solver and large run-time cost, and would let a reviewer argue the
+  gains came from FORESIGHT rather than from SIZING. Named as future work.
+
+================================================================================
+12. THE TWO DESIGNS
+================================================================================
+  OUTAGE-BLIND   fitness on the all-hours-available counterfactual
+                 reserve = stateOfChargeMinimum, constraint inactive
+                 Represents conventional sizing that ignores grid unreliability.
+
+  OUTAGE-AWARE   fitness on the five in-sample outage traces
+                 reserve(t) from FITTED STATISTICS, constraint active
+                 Represents outage-aware sizing AND operation.
+
+  Both are re-scored on IDENTICAL traces. Crossing each design's SIZING with each
+  design's DISPATCH POLICY gives four cells from only two optimizer runs, which
+  separates the sizing effect from the operating effect.
+
+*** NEVER REPORT THE BLIND DESIGN'S COST FROM ITS OWN OUTAGE-FREE RUN. ***
+  Counter-intuitively it comes out HIGHER, not lower. On an all-available trace
+  the feeder is billed for every kilowatt hour, whereas an outage trace
+  disconnects non-critical load for 758 h/yr that nobody pays for. Outages look
+  like a SAVING to a model that does not price unserved energy. Measured:
+  $8.41M on its own trace vs $8.13M for the same sizing on outage traces.
+
+CLAIRVOYANCE GUARD, ENFORCED STRUCTURALLY: the aware reserve policy reads
+expectedForeseeableOutageHours, computed from fitted statistics conditioned on
+month and hour of day. The statistics struct holds NO realised trace. It is not
+possible for the aware controller to consult the trace it is about to be
+simulated against, even by mistake. Only the FOREWARNED variant reads a trace,
+and only its foreseeable causes - never faults.
+
+================================================================================
+13. DECLARED LIMITATIONS
+================================================================================
+1.  SINGLE-BUS ASSUMPTION. No internal network constraints, no voltage or
+    thermal limits on feeder sections. At 1.5 MW this is a real simplification.
+2.  MOTOR STARTING on critical water pumping is not modelled. Would require
+    inverter overload capability and pump starting kVA.
+3.  ONE WEATHER YEAR only. No weather sensitivity is possible with the supplied
+    data.
+4.  ONE HISTORICAL OUTAGE TRACE. All synthetic traces descend from it, so any
+    structural feature it lacks is absent from the whole study.
+5.  PHOTOVOLTAIC DEGRADATION is applied as an annual energy correction bought
+    from the grid, not by re-dispatching each of the 25 years. Good here because
+    the feeder imports in almost every hour; would not be in an islanded system.
+6.  FAULT SEASONALITY not modelled - eleven events is too few to fit.
+7.  LAND PERMITTING not modelled; only land PRICE is.
+8.  72-HOUR STRESS CASE does not appear in the supplied trace (longest fault is
+    13 h), so tank sizing must be tested as a separately injected scenario.
+9.  Rooftop photovoltaic not modelled - see the note in section 9.
+
+================================================================================
+14. OPEN ACTION ITEMS, IN ORDER OF LEVERAGE
+================================================================================
+1.  LAND PRICE per acre near the feeder, and the acquisition premium multiple.
+    Highest leverage of anything outstanding - swings optimal array 5x.
+2.  LAND TENURE decision: purchase or lease. Matters nearly as much as price.
+3.  LAND REAL APPRECIATION rate, or better, the SPREAD against the discount rate.
+4.  FEEDER CUSTOMER-CLASS ENERGY BREAKDOWN, to replace the assumed 8.60 BDT/kWh
+    import tariff with a derived one.
+5.  GRID-FORMING INVERTER $/kW budgetary quote. Weakest capex line.
+6.  INTERCONNECTION TRANSFORMER RATING, which sets the export cap.
+7.  PHOTOVOLTAIC INSTALLED CAPEX from a local EPC.
+8.  BATTERY CAPEX from a Bangladeshi importer of Chinese LFP.
+9.  EXACT SUBSTATION COORDINATES for the NASA POWER pull.
+10. DIESEL PRICE current at time of writing, cited as the BPC administered price.
+
+================================================================================

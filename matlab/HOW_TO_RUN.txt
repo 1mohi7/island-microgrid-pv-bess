@@ -1,0 +1,476 @@
+================================================================================
+HOW TO RUN
+Microgrid sizing, Feni feeder - MATLAB implementation
+================================================================================
+
+CONTENTS
+  0. Requirements and setup
+  1. Put the data in place
+  2. Quickest possible start
+  3. Step-by-step, one component at a time
+  4. Which function gives which figure
+  5. Reading the console output
+  6. Changing assumptions and running sensitivities
+  7. Runtime expectations
+  8. Troubleshooting
+  9. File map
+
+================================================================================
+0. REQUIREMENTS AND SETUP
+================================================================================
+MATLAB R2019b or later. No toolboxes are strictly required. Two things degrade
+gracefully if you lack them:
+  - Statistics and Machine Learning Toolbox: only `boxplot`, used in two panels.
+    Replace with `bar(mean(...))` if unavailable.
+  - `juliandate` (Aerospace Toolbox in some releases; base MATLAB in others).
+    If missing, see Troubleshooting item T4 for a three-line replacement.
+
+Add the project to the path. Every entry-point script does this for you, but if
+you want to call components directly:
+
+    cd /path/to/matlab
+    addpath('config','components','dispatch','optimizer','plots')
+
+================================================================================
+1. PUT THE DATA IN PLACE
+================================================================================
+Copy the three CSV files into the `data/` folder, keeping the exact filenames:
+
+    data/hourly_feeder_load_profile_spliting.csv
+    data/loadshedding_schedule_1_year_with_status_flag.csv
+    data/renewable_relevent_utc06_nasaPowerPoint_Hourly_20250101_20251231.csv
+
+All three must be exactly 8760 rows and index the same hours of 2025, row for
+row. loadFeederInputs.m checks this and ERRORS rather than warning. That is
+deliberate: a silent misalignment between load and solar is the failure mode
+most likely to produce plausible-looking nonsense.
+
+================================================================================
+2. QUICKEST POSSIBLE START
+================================================================================
+Three lines gets you both designs and the headline figure:
+
+    results = runOptimizer();          % ~3-8 minutes, see section 7
+    plotDesignComparison(results);     % FIGURE 5 - the headline result
+    plotInputValidation(results);      % FIGURE 1 - sanity-check the inputs
+
+`runOptimizer` prints both designs and the four-cell comparison table, and saves
+everything to results/optimizerResults.mat. If you come back later:
+
+    load('results/optimizerResults.mat');   % restores `results`
+    plotDesignComparison(results);
+
+================================================================================
+3. STEP-BY-STEP, ONE COMPONENT AT A TIME
+================================================================================
+Run these in order the first time. Each block stands alone and each check is
+worth doing before trusting anything downstream.
+
+--- STEP 1: parameters -------------------------------------------------------
+    P = microgridParameters();
+    disp(P.optimisation.photovoltaicCapacityBoundsKilowatts)
+
+  Every value with its source is in ASSUMPTIONS.txt. Read section 9 of that file
+  (LAND) before quoting any result - it is the highest-leverage assumption in
+  the study and it is ASSUMED, not sourced.
+
+--- STEP 2: load and validate the inputs -------------------------------------
+    inputs = loadFeederInputs('./data', P);
+    fprintf('Peak %.0f kW, critical peak %.0f kW, load factor %.4f\n', ...
+        inputs.peakLoadKilowatts, inputs.peakCriticalLoadKilowatts, inputs.loadFactor);
+    disp(inputs.timezoneCheck);
+
+  CHECK: peakIrradianceHourBin should be 11, and
+  additionalShiftRequiredHours should be 0. The solar file is ALREADY UTC+6 -
+  do NOT apply the +6 h shift the original brief describes. If this function
+  errors on timezone, stop and resolve it; nothing downstream is meaningful.
+
+  CHECK: loadFactor should land near 0.563. It is DERIVED from the profile, not
+  asserted.
+
+--- STEP 3: photovoltaic resource --------------------------------------------
+    pv = photovoltaicModel(inputs, P);
+    fprintf('Yield %.0f kWh/kWp, capacity factor %.4f, transposition %+.1f%%\n', ...
+        pv.annualYieldKilowattHoursPerInstalledKilowatt, pv.capacityFactor, ...
+        pv.transpositionGainFraction*100);
+
+  CHECK: capacity factor near 0.151, inside the 0.15-0.19 published band. The
+  function warns if it is outside.
+
+  DOUBLE-COUNTING TEST, worth running once:
+    Q = P; Q.photovoltaic.directCurrentSystemDerateFraction = ...
+           P.photovoltaic.directCurrentSystemDerateFraction/2;
+    pvHalf = photovoltaicModel(inputs, Q);
+    ratio = pvHalf.annualYieldKilowattHoursPerInstalledKilowatt / ...
+            pv.annualYieldKilowattHoursPerInstalledKilowatt;   % must be EXACTLY 0.5
+  If the ratio is not 0.5, temperature or inverter efficiency has crept into the
+  derate and is being counted twice.
+
+--- STEP 4: outage model and traces ------------------------------------------
+    statistics = outageModel(inputs, P);
+    fprintf('Calibration: shedding x%.3f, fault x%.3f\n', ...
+        statistics.sheddingIntensityCalibrationFactor, ...
+        statistics.faultIntensityCalibrationFactor);
+
+    historical = summariseTrace(inputs.historicalGridAvailableFlags, ...
+                                inputs.historicalOutageCauseCodes, P);
+    [a, c] = sampleOutageTrace(statistics, 12345, P);
+    sampled = summariseTrace(a, c, P);
+    disp([historical.unavailabilityPercent sampled.unavailabilityPercent]);
+
+  CHECK: sampled unavailability near 8.6%, shedding near 670 h, max shedding
+  duration 2 h (NOT more - if it exceeds 2, the non-overlap placement has
+  broken). Calibration factors around 1.16 and 1.08.
+
+--- STEP 5: components, individually ------------------------------------------
+    battery   = batteryModel(2000, 400, P);
+    generator = dieselGeneratorModel(250, P);
+    inverter  = gridFormingInverterModel(400, 250, P);
+    grid      = gridConnectionModel(P);
+
+    generator.specificFuelConsumptionLitresPerKilowattHour(250)  % ~0.33 L/kWh
+    generator.specificFuelConsumptionLitresPerKilowattHour(75)   % ~0.52 L/kWh, worse
+    battery.maximumDischargePowerKilowatts                        % 400 (inverter binds)
+    inverter.islandServingCapacityKilowatts                       % 650 = 400 + 250
+    grid.exportPowerCapKilowatts                                  % 1600
+
+--- STEP 6: reserve policy ----------------------------------------------------
+    blindPolicy = reservePolicy('blind', statistics, inputs, P, 6);
+    awarePolicy = reservePolicy('aware', statistics, inputs, P, 6);
+    blindReserve = blindPolicy.buildProfile(2000, inputs.historicalOutageCauseCodes);
+    awareReserve = awarePolicy.buildProfile(2000, inputs.historicalOutageCauseCodes);
+    plot(0:23, accumarray(inputs.hourOfDayByHour+1,[blindReserve awareReserve],[24 2])/365);
+
+  CHECK: blind is flat at 0.10; aware rises through the afternoon and peaks near
+  16:00-17:00, before the evening shedding window.
+
+--- STEP 7: dispatch on a fixed sizing ---------------------------------------
+    sizing.photovoltaicCapacityKilowatts      = 1500;
+    sizing.batteryEnergyCapacityKilowattHours = 2000;
+    sizing.generatorRatingKilowatts           = 250;
+    sizing.inverterRatingKilowatts            = 400;
+
+    generation = pv.generationPerInstalledKilowatt * 1500;
+    run = dispatchSimulator(generation, inputs, ...
+            inputs.historicalGridAvailableFlags, inputs.historicalOutageCauseCodes, ...
+            awareReserve, sizing, P, true);
+
+    fprintf('Balance residual %.2e kW (worst hour)\n', run.worstHourlyBalanceErrorKilowatts);
+    fprintf('Fuel %.0f L, LOLP %.5f, generator held reference %d h\n', ...
+        run.fuelConsumedLitres, run.lossOfLoadProbabilityCritical, ...
+        run.hoursGeneratorHeldReference);
+
+  CHECK: worstHourlyBalanceErrorKilowatts must be below 1e-6. The function warns
+  if not. Everything downstream is meaningless if the energy balance is open.
+
+  POLICY COMPARISON on identical hardware - this is the core experiment:
+    runBlind = dispatchSimulator(generation, inputs, ...
+                 inputs.historicalGridAvailableFlags, ...
+                 inputs.historicalOutageCauseCodes, blindReserve, sizing, P, true);
+    fprintf('Fuel: blind %.0f L, aware %.0f L (%+.0f%%)\n', ...
+        runBlind.fuelConsumedLitres, run.fuelConsumedLitres, ...
+        (run.fuelConsumedLitres/runBlind.fuelConsumedLitres - 1)*100);
+  Expect the aware policy to cut fuel by roughly a quarter on the SAME hardware.
+
+--- STEP 8: economics ---------------------------------------------------------
+    economics = economicsModel(sizing, run, P);
+    fprintf('NPC $%.3fM, levelised %.2f BDT/kWh, land %.1f acres\n', ...
+        economics.netPresentCostUsd/1e6, ...
+        economics.levelisedCostBdtPerKilowattHour, economics.landAcres);
+    disp(economics.breakdown);
+
+  CHECK: grid energy should be the largest single term (around two thirds).
+  Levelised cost near 12-13 BDT/kWh against an 8.60 BDT/kWh import tariff - the
+  microgrid is more expensive per unit than the grid it supplements, which is
+  the honest starting point for the baseline comparisons.
+
+--- STEP 9: convergence study (run BEFORE trusting any comparison) -----------
+    study = runConvergenceStudy();          % ~5-15 minutes
+
+  This is NOT how the optimal system is found. It exists so that the claim
+  "outage-aware beats outage-blind" cannot be answered with "or the blind arm
+  just ran out of iterations". CHECK: every population converges to the same
+  value; 99% of gain captured well before 100 iterations.
+
+--- STEP 10: the optimizer ----------------------------------------------------
+    results = runOptimizer('./data', 12, 0.01);
+
+  Arguments: data directory, number of seeds, loss-of-load threshold.
+
+================================================================================
+4. WHICH FUNCTION GIVES WHICH FIGURE
+================================================================================
+
+  FIGURE 1  plotInputValidation(results)
+            Input data validation, 6 panels.
+            (a) timezone alignment - THE critical check
+            (b) clearest day of the year
+            (c) mean daily load shape, total vs critical
+            (d) grid unavailability heatmap, hour-of-day x month
+            (e) outage duration by cause
+            (f) shedding vs load vs solar coincidence
+            USE PANEL (f) to motivate the whole study: shedding peaks at
+            18:00-22:00, hours after solar has gone to zero.
+
+  FIGURE 2  plotResourceValidation(results)
+            Photovoltaic chain and outage sampler fidelity, 6 panels.
+            (a) Perez transposition by month
+            (b) loss chain - proves each factor is applied exactly once
+            (c) capacity factor across the derate sweep, vs published band
+            (d) sampler reproduces the shedding roster shape
+            (e) sampled distribution vs the historical year
+            (f) the driving signal for the aware reserve
+            USE PANEL (b) if a reviewer questions double-counting.
+            USE PANEL (f) to answer the clairvoyance objection.
+
+  FIGURE 3  plotDispatchValidation(results)
+            Dispatch behaviour and the reserve policy effect.
+            (a) the ONE argument that differs between designs
+            (b) realised state of charge - the battery arrives charged
+            (c) annual diesel on IDENTICAL hardware, blind/aware/forewarned
+            (d) the longest outage of the year, stacked dispatch
+            USE PANEL (c) for the value-of-forewarning number.
+            USE PANEL (d) to show the state machine doing something sensible.
+
+  FIGURE 4  plotEconomics(results)
+            Cost structure and the search landscape.
+            (a) where the money goes
+            (b) land cost moves the optimum off the bound
+            (c) net present cost against photovoltaic capacity
+            (d) why the brief's penalty formula had to change
+            USE PANEL (b) as the land-cost sensitivity result.
+            NOTE: this figure re-runs dispatch many times and takes 1-3 minutes.
+
+  FIGURE 5  plotDesignComparison(results)
+            THE HEADLINE RESULT.
+            (a) all four cells from two optimizer runs, feasible in green and
+                infeasible in red
+            (b) what each design actually built
+            (c) convergence curves, every seed
+            (d) seed noise against the design gap
+            USE PANEL (a) as the main results table figure.
+
+  FIGURE 6  plotConvergenceStudy(study)
+            Called automatically at the end of runConvergenceStudy.
+            (a) convergence on a COMMON EVALUATION BUDGET, not per iteration
+            (b) final quality by population size
+            (c) when the search stops moving
+            USE ALL THREE to justify population 30 and 100 iterations.
+
+  Saving a figure:
+      exportgraphics(gcf, 'results/figure5.png', 'Resolution', 300);
+
+================================================================================
+5. READING THE CONSOLE OUTPUT
+================================================================================
+runOptimizer prints five blocks.
+
+  [1/5] Input validation. Confirm the timezone line says the peak bin is 11.
+  [2/5] Resource. Confirm capacity factor near 0.151.
+  [3/5] Outage model. Confirm the calibration factors are near 1.16 and 1.08.
+  [4/5] Per-seed optimisation. Both designs should be almost identical across
+        seeds - the landscape is effectively unimodal here.
+  [5/5] The four-cell table. THIS IS THE RESULT.
+
+Reading the four-cell table. Expect something like:
+
+    Blind sizing, blind dispatch    $7.083M    8.69%   INFEASIBLE
+    Blind sizing, aware dispatch    $7.083M    8.69%   INFEASIBLE
+    Aware sizing, blind dispatch    $7.698M    5.26%   INFEASIBLE
+    Aware sizing, aware dispatch    $7.655M    0.99%   feasible
+
+Three things to notice:
+  - The blind design is CHEAPER only because it is not solving the problem. It
+    fails the constraint by a factor of nearly nine.
+  - The blind design's two cells are IDENTICAL, because it builds no battery, so
+    a reserve policy has nothing to act on. The policy needs storage to be a
+    policy at all.
+  - Aware sizing under blind DISPATCH still fails at 5.26%. The reserve policy is
+    load-bearing, not a refinement: buy the right hardware, operate it blind, and
+    you still miss the target.
+
+Feasibility audit. The run prints how many of the returned winners are feasible.
+It must be all of them. If it is not, the penalty weights need raising.
+
+================================================================================
+6. CHANGING ASSUMPTIONS AND RUNNING SENSITIVITIES
+================================================================================
+Never edit microgridParameters.m for a sensitivity run. Copy and override:
+
+    P = microgridParameters();
+    P.costs.landPurchaseCostUsdPerAcre = 40000;
+    P.costs.landTenure = 'lease';
+
+Then pass P down by calling the components directly (steps 2-8 above), or edit
+the single line in runOptimizer.m that calls microgridParameters().
+
+The sensitivities worth running first, in order of leverage:
+
+  1. LAND PRICE            P.costs.landPurchaseCostUsdPerAcre   40k / 90k / 160k
+  2. LAND TENURE           P.costs.landTenure                   'purchase'/'lease'
+  3. ACQUISITION PREMIUM   P.costs.landAcquisitionPremiumMultiplier  1.5 / 2.0 / 2.5
+  4. APPRECIATION SPREAD   P.costs.landRealAppreciationRatePerYear   0.03/0.06/0.09
+     Sweep this as a SPREAD against the discount rate, not independently - if
+     the two are equal, land is free in net present cost terms.
+  5. IMPORT TARIFF         P.tariff.importTariffBdtPerKilowattHour   8 to 13
+  6. LOSS-OF-LOAD THRESHOLD  third argument of runOptimizer: .005 .01 .02 .05 .10
+     THIS IS THE MOST INFORMATIVE AXIS in the study, because the constraint is
+     what buys every piece of hardware. Make it the main results table, not a
+     robustness check.
+  7. DIESEL PRICE          P.costs.dieselFuelPriceBdtPerLitre   80 to 150
+  8. DISCOUNT RATE         P.costs.realDiscountRateFraction     0.06 to 0.12
+  9. GRID-FORMING PREMIUM  P.costs.gridFormingPremiumFractionOnPowerConversion
+
+Threshold sweep, as a loop:
+
+    thresholds = [0.005 0.01 0.02 0.05 0.10];
+    sweep = cell(numel(thresholds),1);
+    for k = 1:numel(thresholds)
+        sweep{k} = runOptimizer('./data', 12, thresholds(k));
+    end
+
+================================================================================
+7. RUNTIME EXPECTATIONS
+================================================================================
+Measured on the reference Python implementation and scaled; MATLAB's loop
+overhead makes the dispatch roughly 5-20x slower than the compiled reference,
+so budget generously the first time.
+
+  one 8760-hour dispatch                    30-150 ms
+  one fitness evaluation (5 traces)         0.2-0.8 s
+  one optimizer run (30 x 100 = 3,000)      3-12 min   (less with cache hits)
+  runOptimizer, 12 seeds, both designs      1-4 hours
+  runConvergenceStudy, defaults             1-3 hours
+
+TO GET A RESULT QUICKLY while you are still checking things work:
+
+    results = runOptimizer('./data', 2, 0.01);        % 2 seeds
+    % or reduce the budget first:
+    % edit config/microgridParameters.m:
+    %   P.optimisation.populationSize    = 15;
+    %   P.optimisation.maximumIterations = 40;
+
+The convergence study shows that population 10 and about 40 iterations already
+reach the same optimum, so a reduced budget is fine for exploration. Use the
+full 30 x 100 for anything you intend to publish.
+
+SPEEDING IT UP:
+  - The cache is shared across seeds within a design and does most of the work
+    late in a run when the swarm has converged. Do not clear it between seeds.
+  - `parfor` over seeds in runOptimizer works, but each worker then has its own
+    cache. Worth it above about 8 seeds.
+  - The dispatch loop is the bottleneck. MATLAB Coder on dispatchSimulator.m
+    would give the largest single speed-up.
+
+================================================================================
+8. TROUBLESHOOTING
+================================================================================
+T1  "Load and solar files disagree on N timestamps"
+    The two CSVs do not index the same hours. Check for a leap year, a partial
+    NASA POWER pull, or a different start date. Do not "fix" this by trimming
+    rows until the counts match - confirm the actual hours align.
+
+T2  "Solar resource peaks in hour bin X but true solar noon falls at 11.90"
+    The solar file is not in local time. If you pulled fresh NASA POWER data it
+    will be in UTC and DOES need the +6 h shift. The file supplied with this
+    project does NOT. Shift it before calling loadFeederInputs, not after.
+
+T3  Capacity factor warning, outside 0.15-0.19
+    Check in this order: soiling assumption, tilt, then whether the timezone is
+    right. A timezone error usually shows up here first as a low capacity factor.
+
+T4  "Undefined function 'juliandate'"
+    Replace the call in components/solarGeometry.m with:
+        julianDay = datenum(midpointUtc) + 1721058.5;
+    (datenum epoch 0000-01-00 to Julian Day.)
+
+T5  "Undefined function 'boxplot'"
+    Statistics Toolbox not installed. Replace with a bar of the mean, or use
+    `histogram`. Only affects two panels; nothing computational depends on it.
+
+T6  Dispatch warns "Hourly power balance does not close"
+    A real bug, not a tolerance issue. The most likely cause is a curtailment
+    path that adds to a total without adding to the `curtailed` channel.
+    Curtailment must be a SINGLE bucket carrying both photovoltaic spill and
+    generator minimum-loading surplus.
+
+T7  The optimizer returns an infeasible winner
+    Raise P.optimisation.constraintPenaltyLinearWeightUsd. It must exceed the
+    entire spread of net present cost across the feasible space, divided by the
+    smallest violation you care about. A pure quadratic will NOT do this - see
+    ASSUMPTIONS.txt section 10.
+
+T8  Sampled shedding events longer than 2 hours
+    Non-overlap placement has broken. Check placeEvent in sampleOutageTrace.m -
+    the guard window must extend one hour either side, so that independently
+    sampled blocks cannot abut and merge.
+
+T9  Results differ between runs with the same seed
+    Every random draw goes through an explicit RandStream seeded from the seed
+    argument. If you see drift, something is calling `rand` without a stream.
+
+T9b optimizerResults.mat is hundreds of MB
+    Fixed as of this revision - greyWolfOptimizer.m now returns the evaluator
+    (and its growing cache) as a SECOND output rather than as result.evaluator,
+    so it never reaches anything that gets saved. If you have modified the
+    optimizer and the file has bloated again, search for any line of the form
+    `result.evaluator = evaluator` or `something.cache = evaluator.cache` and
+    remove it - the cache belongs in a local variable used to thread the
+    optimizer between seeds, never in a struct passed to save().
+
+T10 The blind design returns all zeros
+    This is CORRECT, not a bug, at the default land cost. With land priced at
+    twice market, no component pays for itself on tariff arbitrage alone, so an
+    optimizer that cannot see outages concludes the cheapest microgrid is no
+    microgrid. It is the strongest version of the study's thesis. Set
+    P.costs.landPurchaseCostUsdPerAcre = 0 to see the contrast: the blind design
+    then rides to the 3,000 kW photovoltaic bound.
+
+================================================================================
+9. FILE MAP
+================================================================================
+  runOptimizer.m               MAIN ENTRY. Both designs + four-cell comparison.
+  runConvergenceStudy.m        Population and iteration sufficiency.
+  ASSUMPTIONS.txt              Every value, with source and sweep range.
+  HOW_TO_RUN.txt               This file.
+
+  config/
+    microgridParameters.m      All parameters, one nested struct.
+
+  components/
+    loadFeederInputs.m         Read + validate the three CSVs; timezone check.
+    solarGeometry.m            Sun position, extraterrestrial irradiance, air mass.
+    photovoltaicModel.m        Perez transposition, NOCT, per-kW generation.
+    batteryModel.m             Limits, efficiencies, lifetime.
+    dieselGeneratorModel.m     Fuel curve, minimum loading, catalogue snapping.
+    gridFormingInverterModel.m Islanding capability.
+    gridConnectionModel.m      Import, export, quarterly net-metering settlement.
+    outageModel.m              Fit the sampler to the historical trace.
+    sampleOutageTrace.m        Draw one synthetic year.
+    allHoursAvailableTrace.m   The outage-blind counterfactual.
+    expectedForeseeableOutageHours.m  Forward statistic for the aware policy.
+    summariseTrace.m           Trace statistics for validation.
+
+  dispatch/
+    reservePolicy.m            blind / aware / forewarned. THE policy variable.
+    dispatchSimulator.m        Two-mode rule-based state machine.
+    economicsModel.m           Net present cost, replacement, salvage, levelised cost.
+
+  optimizer/
+    fitnessEvaluator.m         Construct an evaluator (traces + policy + constraint).
+    snapPositionToSizing.m     Catalogue snapping and quantisation.
+    evaluateFitness.m          Dispatch across traces -> economics -> penalty.
+    greyWolfOptimizer.m        Canonical GWO, design-agnostic.
+
+  plots/
+    plotInputValidation.m      FIGURE 1
+    plotResourceValidation.m   FIGURE 2
+    plotDispatchValidation.m   FIGURE 3
+    plotEconomics.m            FIGURE 4
+    plotDesignComparison.m     FIGURE 5
+    plotConvergenceStudy.m     FIGURE 6
+
+  data/                        The three input CSVs go here.
+  results/                     .mat files written by the entry-point scripts.
+
+================================================================================

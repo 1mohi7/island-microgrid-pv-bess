@@ -1,0 +1,8 @@
+summaryParameter,baseValue,summaryUnit,maxAbsoluteNpcChangeUsd,maxAbsoluteNpcChangePercent,variationAtMaximumPercent,baseDesignHolds
+PV CAPEX,650,USD/kWp,189618,2.50948781051585,-20,0
+BESS energy CAPEX,280,USD/kWh,15107.4348781081,0.19993842185222,-20,1
+Diesel-generator CAPEX,350,USD/kW,11307.1440243768,0.149643705243809,-20,1
+Land purchase cost,50000,USD/acre,59760.7398567693,0.790899852429472,-20,1
+Diesel fuel price,115,BDT/L,46221.5158897378,0.611715821856901,20,1
+Grid import tariff,8.6,BDT/kWh,1115953.63279724,14.76902002239,20,0
+Real discount rate,9,%,1122603.77408129,14.8570309100196,-20,0
